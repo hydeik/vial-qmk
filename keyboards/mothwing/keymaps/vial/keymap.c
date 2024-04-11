@@ -26,6 +26,15 @@ enum layer_number {
     _LOWER,
 };
 
+enum custom_keycodes {
+    UPDIR = SAFE_RANGE,
+    M_UPDIR,
+    M_INCLUDE,
+    M_DOCSTR,
+    M_MKGRVS,
+    M_EQEQ,
+};
+
 #define KC_L_SPC LT(_LOWER, KC_SPC)  // lower
 #define KC_R_ENT LT(_RAISE, KC_ENT)  // raise
 #define KC_G_JA LGUI_T(KC_LNG1)      // cmd or win
@@ -70,3 +79,148 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
     //                  `--------+--------+--------+--------'   `--------+--------+--------+--------'
     ),
 };
+
+// Callback for the Caps Word features
+bool caps_word_press_user(uint16_t keycode) {
+    switch (keycode) {
+        // Keycodes that continue Caps Word, with shift applied.
+        case KC_A ... KC_Z:
+            add_weak_mods(MOD_BIT(KC_LSFT));  // Apply shift to the next key.
+            return true;
+
+            // Keycodes that continue Caps Word, without shifting.
+        case KC_1 ... KC_0:
+        case KC_BSPC:
+        case KC_DEL:
+            // I have a dedicated underscore key, so no need to shift KC_MINS.
+        case KC_MINS:
+        case KC_UNDS:
+            return true;
+
+        default:
+            return false;  // Deactivate Caps Word.
+    }
+}
+
+// Alternate keys
+uint16_t get_alt_repeat_key_keycode_user(uint16_t keycode, uint8_t mods) {
+    if ((mods & ~MOD_MASK_SHIFT) == 0) {
+        switch (keycode) {
+            // For navigating next/previous search results in Vim:
+            // N -> Shift + N, Shift + N -> N.
+            case KC_N:
+                if ((mods & MOD_MASK_SHIFT) == 0) {
+                    return S(KC_N);
+                }
+                return KC_N;
+            case KC_DOT:                    // . -> ./
+                return M_UPDIR;
+            case KC_COMM:                   // ! -> ==
+                if ((mods & MOD_MASK_SHIFT) == 0) {
+                    return KC_NO;
+                }
+            // Fall through intended.
+            case KC_EQL:                    // = -> ==
+                return M_EQEQ;
+            case KC_HASH:                   // # -> include
+                return M_INCLUDE;
+            case KC_QUOT:
+                if ((mods & MOD_MASK_SHIFT) != 0) {
+                    return M_DOCSTR;        // " -> ""<cursor>"""
+                }
+                return KC_NO;
+            case KC_GRV:                    // ` -> ``<cursor>``` (for Markdown code)
+                return M_MKGRVS;
+            case KC_LABK:                   // < -> - (for Haskell)
+                return KC_MINS;
+        }
+    }
+    return KC_TRNS;
+}
+
+bool remember_last_key_user(uint16_t keycode, keyrecord_t* record,
+        uint8_t* remembered_mods) {
+    // Unpack tapping keycode for tap-hold keys.
+    switch (keycode) {
+#ifndef NO_ACTION_TAPPING
+        case QK_MOD_TAP ... QK_MOD_TAP_MAX:
+            keycode = QK_MOD_TAP_GET_TAP_KEYCODE(keycode);
+            break;
+#ifndef NO_ACTION_LAYER
+        case QK_LAYER_TAP ... QK_LAYER_TAP_MAX:
+            keycode = QK_LAYER_TAP_GET_TAP_KEYCODE(keycode);
+            break;
+#endif  // NO_ACTION_LAYER
+#endif  // NO_ACTION_TAPPING
+    }
+
+    // Forget Shift on letters when Shift or AltGr are the only mods.
+    // Exceptionally, I want Shift remembered on N and Z for "NN" and "ZZ" in Vim.
+    switch (keycode) {
+        case KC_A ... KC_M:
+        case KC_O ... KC_Y:
+            if ((*remembered_mods & ~(MOD_MASK_SHIFT | MOD_BIT(KC_RALT))) == 0) {
+                *remembered_mods &= ~MOD_MASK_SHIFT;
+            }
+            break;
+    }
+
+    return true;
+}
+
+// An enhanced version of SEND_STRING: if Caps Word is active, the Shift key is
+// held while sending the string. Additionally, the last key is set such that if
+// the Repeat Key is pressed next, it produces `repeat_keycode`.
+#define MAGIC_STRING(str, repeat_keycode) \
+    magic_send_string_P(PSTR(str), (repeat_keycode))
+static void magic_send_string_P(const char* str, uint16_t repeat_keycode) {
+    uint8_t saved_mods = 0;
+    // If Caps Word is on, save the mods and hold Shift.
+    if (is_caps_word_on()) {
+        saved_mods = get_mods();
+        register_mods(MOD_BIT(KC_LSFT));
+    }
+
+    send_string_with_delay_P(str, TAP_CODE_DELAY);  // Send the string.
+    set_last_keycode(repeat_keycode);
+
+    // If Caps Word is on, restore the mods.
+    if (is_caps_word_on()) {
+        set_mods(saved_mods);
+    }
+}
+
+bool process_record_user(uint16_t keycode, keyrecord_t* record) {
+    // if (!process_achordion(keycode, record)) { return false; }
+    // Your macros ...
+    if (record->event.pressed) {
+        switch (keycode) {
+            case UPDIR:
+                SEND_STRING_DELAY("../", TAP_CODE_DELAY);
+                return false;
+            // Macros invoked through the MAGIC key.
+            case M_UPDIR:
+                MAGIC_STRING(/*.*/"./", UPDIR);
+                break;
+            case M_INCLUDE:
+                SEND_STRING_DELAY(/*#*/"include ", TAP_CODE_DELAY);
+                break;
+            case M_EQEQ:
+                SEND_STRING_DELAY(/*=*/"==", TAP_CODE_DELAY);
+                break;
+            case M_DOCSTR:
+                SEND_STRING_DELAY(/*"*/"\"\"\"\"\""
+                        SS_TAP(X_LEFT) SS_TAP(X_LEFT) SS_TAP(X_LEFT), TAP_CODE_DELAY);
+                break;
+            case M_MKGRVS:
+                SEND_STRING_DELAY(/*`*/"``\n\n```" SS_TAP(X_UP), TAP_CODE_DELAY);
+                break;
+        }
+    }
+
+    return true;
+}
+
+// void matrix_scan_user(void) {
+//     achordion_task();
+// }
